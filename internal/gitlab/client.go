@@ -14,6 +14,7 @@ import (
 )
 
 const maxResponseBodyForError = 512
+const perPageLimit = 100
 
 var ErrUnauthorized = errors.New("unauthorized GitLab API request")
 
@@ -34,6 +35,22 @@ type MergeRequest struct {
 	DiffRefs DiffRefs
 }
 
+type Discussion struct {
+	ID         string
+	Resolved   bool
+	Resolvable bool
+	Notes      []DiscussionNote
+}
+
+type DiscussionNote struct {
+	Body string
+}
+
+type MergeRequestNote struct {
+	ID   int
+	Body string
+}
+
 type mergeRequestResponse struct {
 	IID      int                  `json:"iid"`
 	DiffRefs mergeRequestDiffRefs `json:"diff_refs"`
@@ -43,6 +60,22 @@ type mergeRequestDiffRefs struct {
 	BaseSHA  string `json:"base_sha"`
 	StartSHA string `json:"start_sha"`
 	HeadSHA  string `json:"head_sha"`
+}
+
+type discussionResponse struct {
+	ID         string                   `json:"id"`
+	Resolved   bool                     `json:"resolved"`
+	Resolvable bool                     `json:"resolvable"`
+	Notes      []discussionNoteResponse `json:"notes"`
+}
+
+type discussionNoteResponse struct {
+	Body string `json:"body"`
+}
+
+type mergeRequestNoteResponse struct {
+	ID   int    `json:"id"`
+	Body string `json:"body"`
 }
 
 func NewClient(baseURL, token string, httpClient *http.Client) *Client {
@@ -170,10 +203,177 @@ func (c *Client) CreateMergeRequestNote(ctx context.Context, projectID, mrIID in
 	return c.postForm(ctx, endpoint, form)
 }
 
+func (c *Client) ListMergeRequestDiscussions(ctx context.Context, projectID, mrIID int) ([]Discussion, error) {
+	if err := validateMergeRequestCoordinates(projectID, mrIID); err != nil {
+		return nil, err
+	}
+
+	endpoint := fmt.Sprintf("/api/v4/projects/%d/merge_requests/%d/discussions", projectID, mrIID)
+	page := "1"
+	discussions := make([]Discussion, 0)
+
+	for {
+		req, err := http.NewRequestWithContext(
+			ctx,
+			http.MethodGet,
+			c.baseURL+withPagination(endpoint, page),
+			nil,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create GitLab request: %w", err)
+		}
+		req.Header.Set("PRIVATE-TOKEN", c.token)
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("failed to connect to GitLab at %s: %w", c.baseURL, err)
+		}
+
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			_ = resp.Body.Close()
+			return nil, fmt.Errorf("%w: HTTP %d from %s", ErrUnauthorized, resp.StatusCode, endpoint)
+		}
+		if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+			body, _ := io.ReadAll(io.LimitReader(resp.Body, maxResponseBodyForError))
+			_ = resp.Body.Close()
+			return nil, fmt.Errorf("GitLab API request failed for %s: HTTP %d: %s", endpoint, resp.StatusCode, strings.TrimSpace(string(body)))
+		}
+
+		var payload []discussionResponse
+		if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+			_ = resp.Body.Close()
+			return nil, fmt.Errorf("failed to decode GitLab response from %s: %w", endpoint, err)
+		}
+
+		nextPage := strings.TrimSpace(resp.Header.Get("X-Next-Page"))
+		_ = resp.Body.Close()
+
+		for _, item := range payload {
+			notes := make([]DiscussionNote, 0, len(item.Notes))
+			for _, note := range item.Notes {
+				notes = append(notes, DiscussionNote(note))
+			}
+			discussions = append(discussions, Discussion{
+				ID:         item.ID,
+				Resolved:   item.Resolved,
+				Resolvable: item.Resolvable,
+				Notes:      notes,
+			})
+		}
+
+		if nextPage == "" {
+			break
+		}
+		page = nextPage
+	}
+
+	return discussions, nil
+}
+
+func (c *Client) ResolveMergeRequestDiscussion(ctx context.Context, projectID, mrIID int, discussionID string) error {
+	if err := validateMergeRequestCoordinates(projectID, mrIID); err != nil {
+		return err
+	}
+	discussionID = strings.TrimSpace(discussionID)
+	if discussionID == "" {
+		return fmt.Errorf("discussion ID cannot be empty")
+	}
+
+	endpoint := fmt.Sprintf("/api/v4/projects/%d/merge_requests/%d/discussions/%s", projectID, mrIID, discussionID)
+	form := url.Values{}
+	form.Set("resolved", "true")
+
+	return c.putForm(ctx, endpoint, form)
+}
+
+func (c *Client) ListMergeRequestNotes(ctx context.Context, projectID, mrIID int) ([]MergeRequestNote, error) {
+	if err := validateMergeRequestCoordinates(projectID, mrIID); err != nil {
+		return nil, err
+	}
+
+	endpoint := fmt.Sprintf("/api/v4/projects/%d/merge_requests/%d/notes", projectID, mrIID)
+	page := "1"
+	notes := make([]MergeRequestNote, 0)
+
+	for {
+		req, err := http.NewRequestWithContext(
+			ctx,
+			http.MethodGet,
+			c.baseURL+withPagination(endpoint, page),
+			nil,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create GitLab request: %w", err)
+		}
+		req.Header.Set("PRIVATE-TOKEN", c.token)
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("failed to connect to GitLab at %s: %w", c.baseURL, err)
+		}
+
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			_ = resp.Body.Close()
+			return nil, fmt.Errorf("%w: HTTP %d from %s", ErrUnauthorized, resp.StatusCode, endpoint)
+		}
+		if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+			body, _ := io.ReadAll(io.LimitReader(resp.Body, maxResponseBodyForError))
+			_ = resp.Body.Close()
+			return nil, fmt.Errorf("GitLab API request failed for %s: HTTP %d: %s", endpoint, resp.StatusCode, strings.TrimSpace(string(body)))
+		}
+
+		var payload []mergeRequestNoteResponse
+		if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+			_ = resp.Body.Close()
+			return nil, fmt.Errorf("failed to decode GitLab response from %s: %w", endpoint, err)
+		}
+
+		nextPage := strings.TrimSpace(resp.Header.Get("X-Next-Page"))
+		_ = resp.Body.Close()
+
+		for _, item := range payload {
+			notes = append(notes, MergeRequestNote(item))
+		}
+
+		if nextPage == "" {
+			break
+		}
+		page = nextPage
+	}
+
+	return notes, nil
+}
+
+func (c *Client) UpdateMergeRequestNote(ctx context.Context, projectID, mrIID, noteID int, body string) error {
+	if err := validateMergeRequestCoordinates(projectID, mrIID); err != nil {
+		return err
+	}
+	if noteID <= 0 {
+		return fmt.Errorf("note ID must be positive")
+	}
+	if strings.TrimSpace(body) == "" {
+		return fmt.Errorf("note body cannot be empty")
+	}
+
+	endpoint := fmt.Sprintf("/api/v4/projects/%d/merge_requests/%d/notes/%d", projectID, mrIID, noteID)
+	form := url.Values{}
+	form.Set("body", body)
+
+	return c.putForm(ctx, endpoint, form)
+}
+
 func (c *Client) postForm(ctx context.Context, endpoint string, form url.Values) error {
+	return c.sendForm(ctx, http.MethodPost, endpoint, form)
+}
+
+func (c *Client) putForm(ctx context.Context, endpoint string, form url.Values) error {
+	return c.sendForm(ctx, http.MethodPut, endpoint, form)
+}
+
+func (c *Client) sendForm(ctx context.Context, method, endpoint string, form url.Values) error {
 	req, err := http.NewRequestWithContext(
 		ctx,
-		http.MethodPost,
+		method,
 		c.baseURL+endpoint,
 		strings.NewReader(form.Encode()),
 	)
@@ -202,6 +402,19 @@ func (c *Client) postForm(ctx context.Context, endpoint string, form url.Values)
 	}
 
 	return nil
+}
+
+func withPagination(endpoint, page string) string {
+	page = strings.TrimSpace(page)
+	if page == "" {
+		page = "1"
+	}
+
+	values := url.Values{}
+	values.Set("per_page", strconv.Itoa(perPageLimit))
+	values.Set("page", page)
+
+	return endpoint + "?" + values.Encode()
 }
 
 func validateMergeRequestCoordinates(projectID, mrIID int) error {

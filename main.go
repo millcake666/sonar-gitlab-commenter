@@ -14,6 +14,7 @@ import (
 )
 
 const commentMarker = "<!-- sonar-gitlab-commenter -->"
+const summaryHeading = "**SonarQube summary**"
 
 var summarySeverityOrder = []string{"BLOCKER", "CRITICAL", "MAJOR", "MINOR", "INFO"}
 
@@ -63,6 +64,15 @@ func run() error {
 	}
 	issues = sonar.FilterIssuesBySeverity(issues, cfg.SeverityThreshold)
 	inlineIssues, projectLevelIssues := splitIssuesByLineBinding(issues)
+	resolvedDiscussionsCount, err := resolvePreviousSonarDiscussions(
+		ctx,
+		gitlabClient,
+		cfg.GitLabProjectID,
+		cfg.GitLabMRIID,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to resolve previous SonarQube discussions: %w", err)
+	}
 
 	for _, issue := range inlineIssues {
 		if err := gitlabClient.CreateInlineDiscussion(
@@ -87,18 +97,26 @@ func run() error {
 		return fmt.Errorf("failed to retrieve SonarQube quality gate and coverage: %w", err)
 	}
 
-	if err := gitlabClient.CreateMergeRequestNote(
+	summaryBody := formatMergeRequestSummaryComment(qualityReport, issues, projectLevelIssues)
+	summaryUpdated, err := upsertSummaryNote(
 		ctx,
+		gitlabClient,
 		cfg.GitLabProjectID,
 		cfg.GitLabMRIID,
-		formatMergeRequestSummaryComment(qualityReport, issues, projectLevelIssues),
-	); err != nil {
+		summaryBody,
+	)
+	if err != nil {
 		return fmt.Errorf("failed to post SonarQube summary note: %w", err)
+	}
+	summaryAction := "Posted"
+	if summaryUpdated {
+		summaryAction = "Updated"
 	}
 
 	fmt.Printf("Fetched %d SonarQube issues for project %q\n", len(issues), cfg.SonarProjectKey)
+	fmt.Printf("Resolved %d previous SonarQube discussions in merge request %d\n", resolvedDiscussionsCount, cfg.GitLabMRIID)
 	fmt.Printf("Posted %d inline SonarQube discussions to merge request %d\n", len(inlineIssues), cfg.GitLabMRIID)
-	fmt.Printf("Posted summary SonarQube note to merge request %d\n", cfg.GitLabMRIID)
+	fmt.Printf("%s summary SonarQube note in merge request %d\n", summaryAction, cfg.GitLabMRIID)
 	fmt.Printf(
 		"Quality gate: %s, coverage: %.2f%%, new code coverage: %.2f%%\n",
 		qualityReport.QualityGateStatus,
@@ -108,6 +126,99 @@ func run() error {
 	fmt.Printf("Resolved GitLab merge request: project_id=%d, mr_iid=%d\n", cfg.GitLabProjectID, cfg.GitLabMRIID)
 
 	return nil
+}
+
+func resolvePreviousSonarDiscussions(
+	ctx context.Context,
+	gitlabClient *gitlab.Client,
+	projectID int,
+	mrIID int,
+) (int, error) {
+	discussions, err := gitlabClient.ListMergeRequestDiscussions(ctx, projectID, mrIID)
+	if err != nil {
+		return 0, err
+	}
+
+	resolvedCount := 0
+	for _, discussion := range discussions {
+		if discussion.Resolved || !discussion.Resolvable {
+			continue
+		}
+		if !discussionContainsMarker(discussion) {
+			continue
+		}
+
+		if err := gitlabClient.ResolveMergeRequestDiscussion(ctx, projectID, mrIID, discussion.ID); err != nil {
+			return resolvedCount, err
+		}
+		resolvedCount++
+	}
+
+	return resolvedCount, nil
+}
+
+func discussionContainsMarker(discussion gitlab.Discussion) bool {
+	for _, note := range discussion.Notes {
+		if commentHasMarker(note.Body) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func upsertSummaryNote(
+	ctx context.Context,
+	gitlabClient *gitlab.Client,
+	projectID int,
+	mrIID int,
+	body string,
+) (bool, error) {
+	notes, err := gitlabClient.ListMergeRequestNotes(ctx, projectID, mrIID)
+	if err != nil {
+		return false, err
+	}
+
+	summaryNote, found := findLatestSummaryNote(notes)
+	if !found {
+		if err := gitlabClient.CreateMergeRequestNote(ctx, projectID, mrIID, body); err != nil {
+			return false, err
+		}
+		return false, nil
+	}
+
+	if err := gitlabClient.UpdateMergeRequestNote(ctx, projectID, mrIID, summaryNote.ID, body); err != nil {
+		return false, err
+	}
+
+	return true, nil
+}
+
+func findLatestSummaryNote(notes []gitlab.MergeRequestNote) (gitlab.MergeRequestNote, bool) {
+	var (
+		found     bool
+		latestOne gitlab.MergeRequestNote
+	)
+
+	for _, note := range notes {
+		if !isSummaryNote(note.Body) {
+			continue
+		}
+		if !found || note.ID > latestOne.ID {
+			found = true
+			latestOne = note
+		}
+	}
+
+	return latestOne, found
+}
+
+func isSummaryNote(body string) bool {
+	return commentHasMarker(body) && strings.Contains(body, summaryHeading)
+}
+
+func commentHasMarker(body string) bool {
+	return strings.Contains(body, commentMarker)
 }
 
 func splitIssuesByLineBinding(issues []sonar.Issue) ([]sonar.Issue, []sonar.Issue) {
@@ -146,7 +257,9 @@ func formatMergeRequestSummaryComment(
 
 	var builder strings.Builder
 	builder.WriteString(commentMarker)
-	builder.WriteString("\n**SonarQube summary**\n")
+	builder.WriteString("\n")
+	builder.WriteString(summaryHeading)
+	builder.WriteString("\n")
 	builder.WriteString(fmt.Sprintf("- Quality gate: %s\n", formatQualityGateStatus(qualityReport.QualityGateStatus)))
 	builder.WriteString(fmt.Sprintf("- Overall coverage: %.2f%%\n", qualityReport.OverallCoverage))
 	builder.WriteString(fmt.Sprintf("- New code coverage: %.2f%%\n", qualityReport.NewCodeCoverage))

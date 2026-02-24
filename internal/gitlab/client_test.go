@@ -237,3 +237,143 @@ func TestCreateMergeRequestNoteSuccess(t *testing.T) {
 		t.Fatalf("expected no error, got %v", err)
 	}
 }
+
+func TestListMergeRequestDiscussionsWithPagination(t *testing.T) {
+	t.Parallel()
+
+	requestCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+		if r.Method != http.MethodGet {
+			t.Fatalf("unexpected method: %s", r.Method)
+		}
+		if r.URL.Path != "/api/v4/projects/100/merge_requests/42/discussions" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		if got := r.URL.Query().Get("per_page"); got != "100" {
+			t.Fatalf("unexpected per_page: %q", got)
+		}
+
+		switch page := r.URL.Query().Get("page"); page {
+		case "1":
+			w.Header().Set("X-Next-Page", "2")
+			_, _ = w.Write([]byte(`[{"id":"d1","resolved":false,"resolvable":true,"notes":[{"body":"first"}]}]`))
+		case "2":
+			_, _ = w.Write([]byte(`[{"id":"d2","resolved":true,"resolvable":false,"notes":[{"body":"second"}]}]`))
+		default:
+			t.Fatalf("unexpected page: %s", page)
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "secret-token", server.Client())
+	discussions, err := client.ListMergeRequestDiscussions(context.Background(), 100, 42)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if requestCount != 2 {
+		t.Fatalf("expected 2 requests, got %d", requestCount)
+	}
+	if len(discussions) != 2 {
+		t.Fatalf("expected 2 discussions, got %d", len(discussions))
+	}
+	if discussions[0].ID != "d1" || discussions[1].ID != "d2" {
+		t.Fatalf("unexpected discussions: %+v", discussions)
+	}
+}
+
+func TestResolveMergeRequestDiscussionSuccess(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut {
+			t.Fatalf("unexpected method: %s", r.Method)
+		}
+		if r.URL.Path != "/api/v4/projects/100/merge_requests/42/discussions/discussion-1" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		if err := r.ParseForm(); err != nil {
+			t.Fatalf("failed to parse form: %v", err)
+		}
+		if got := r.PostForm.Get("resolved"); got != "true" {
+			t.Fatalf("unexpected resolved value: %q", got)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "secret-token", server.Client())
+	if err := client.ResolveMergeRequestDiscussion(context.Background(), 100, 42, "discussion-1"); err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+}
+
+func TestListMergeRequestNotesWithPagination(t *testing.T) {
+	t.Parallel()
+
+	requestCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+		if r.Method != http.MethodGet {
+			t.Fatalf("unexpected method: %s", r.Method)
+		}
+		if r.URL.Path != "/api/v4/projects/100/merge_requests/42/notes" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		if got := r.URL.Query().Get("per_page"); got != "100" {
+			t.Fatalf("unexpected per_page: %q", got)
+		}
+
+		switch page := r.URL.Query().Get("page"); page {
+		case "1":
+			w.Header().Set("X-Next-Page", "2")
+			_, _ = w.Write([]byte(`[{"id":11,"body":"note 1"}]`))
+		case "2":
+			_, _ = w.Write([]byte(`[{"id":12,"body":"note 2"}]`))
+		default:
+			t.Fatalf("unexpected page: %s", page)
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "secret-token", server.Client())
+	notes, err := client.ListMergeRequestNotes(context.Background(), 100, 42)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if requestCount != 2 {
+		t.Fatalf("expected 2 requests, got %d", requestCount)
+	}
+	if len(notes) != 2 {
+		t.Fatalf("expected 2 notes, got %d", len(notes))
+	}
+	if notes[0].ID != 11 || notes[1].ID != 12 {
+		t.Fatalf("unexpected notes: %+v", notes)
+	}
+}
+
+func TestUpdateMergeRequestNoteSuccess(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut {
+			t.Fatalf("unexpected method: %s", r.Method)
+		}
+		if r.URL.Path != "/api/v4/projects/100/merge_requests/42/notes/55" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		if err := r.ParseForm(); err != nil {
+			t.Fatalf("failed to parse form: %v", err)
+		}
+		if got := r.PostForm.Get("body"); got != "updated summary" {
+			t.Fatalf("unexpected note body: %q", got)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "secret-token", server.Client())
+	if err := client.UpdateMergeRequestNote(context.Background(), 100, 42, 55, "updated summary"); err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+}
