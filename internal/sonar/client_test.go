@@ -66,15 +66,15 @@ func TestFetchProjectIssuesPaginationAndBinding(t *testing.T) {
 		case "1":
 			_, _ = w.Write([]byte(`{
 				"issues":[
-					{"key":"A","rule":"rule:a","severity":"MAJOR","message":"Issue A","component":"demo:src/a.go","line":10},
-					{"key":"B","rule":"rule:b","severity":"MINOR","message":"Issue B","component":"demo:src/b.go","line":0}
+					{"key":"A","rule":"rule:a","type":"BUG","severity":"MAJOR","message":"Issue A","component":"demo:src/a.go","line":10},
+					{"key":"B","rule":"rule:b","type":"CODE_SMELL","severity":"MINOR","message":"Issue B","component":"demo:src/b.go","line":0}
 				],
 				"paging":{"pageIndex":1,"pageSize":2,"total":3}
 			}`))
 		case "2":
 			_, _ = w.Write([]byte(`{
 				"issues":[
-					{"key":"C","rule":"rule:c","severity":"CRITICAL","message":"Issue C","component":"demo:src/c.go","line":8}
+					{"key":"C","rule":"rule:c","type":"VULNERABILITY","severity":"CRITICAL","message":"Issue C","component":"demo:src/c.go","line":8}
 				],
 				"paging":{"pageIndex":2,"pageSize":2,"total":3}
 			}`))
@@ -90,14 +90,17 @@ func TestFetchProjectIssuesPaginationAndBinding(t *testing.T) {
 		t.Fatalf("expected no error, got %v", err)
 	}
 
-	if len(issues) != 2 {
-		t.Fatalf("expected 2 bound issues, got %d", len(issues))
+	if len(issues) != 3 {
+		t.Fatalf("expected 3 issues, got %d", len(issues))
 	}
-	if issues[0].FilePath != "src/a.go" || issues[0].Line != 10 {
-		t.Fatalf("unexpected first issue binding: %+v", issues[0])
+	if issues[0].FilePath != "src/a.go" || issues[0].Line != 10 || issues[0].Type != "BUG" {
+		t.Fatalf("unexpected first issue content: %+v", issues[0])
 	}
-	if issues[1].FilePath != "src/c.go" || issues[1].Line != 8 {
-		t.Fatalf("unexpected second issue binding: %+v", issues[1])
+	if issues[1].FilePath != "src/b.go" || issues[1].Line != 0 || issues[1].Type != "CODE_SMELL" {
+		t.Fatalf("unexpected second issue content: %+v", issues[1])
+	}
+	if issues[2].FilePath != "src/c.go" || issues[2].Line != 8 || issues[2].Type != "VULNERABILITY" {
+		t.Fatalf("unexpected third issue content: %+v", issues[2])
 	}
 }
 

@@ -24,7 +24,7 @@ func TestValidateMergeRequestSuccess(t *testing.T) {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"iid":42}`))
+		_, _ = w.Write([]byte(`{"iid":42,"diff_refs":{"base_sha":"b","start_sha":"s","head_sha":"h"}}`))
 	}))
 	defer server.Close()
 
@@ -87,5 +87,153 @@ func TestValidateMergeRequestRejectsInvalidArguments(t *testing.T) {
 	err = client.ValidateMergeRequest(context.Background(), 100, 0)
 	if err == nil || !strings.Contains(err.Error(), "merge request IID must be positive") {
 		t.Fatalf("expected invalid merge request IID error, got %v", err)
+	}
+}
+
+func TestGetMergeRequestReturnsDiffRefs(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"iid":42,"diff_refs":{"base_sha":"base","start_sha":"start","head_sha":"head"}}`))
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "secret-token", server.Client())
+	mr, err := client.GetMergeRequest(context.Background(), 100, 42)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if mr.IID != 42 {
+		t.Fatalf("unexpected IID: %d", mr.IID)
+	}
+	if mr.DiffRefs.BaseSHA != "base" || mr.DiffRefs.StartSHA != "start" || mr.DiffRefs.HeadSHA != "head" {
+		t.Fatalf("unexpected diff refs: %+v", mr.DiffRefs)
+	}
+}
+
+func TestCreateInlineDiscussionSuccess(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("unexpected method: %s", r.Method)
+		}
+		if r.URL.Path != "/api/v4/projects/100/merge_requests/42/discussions" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		if got := r.Header.Get("PRIVATE-TOKEN"); got != "secret-token" {
+			t.Fatalf("expected PRIVATE-TOKEN header, got %q", got)
+		}
+		if got := r.Header.Get("Content-Type"); !strings.Contains(got, "application/x-www-form-urlencoded") {
+			t.Fatalf("unexpected Content-Type: %q", got)
+		}
+		if err := r.ParseForm(); err != nil {
+			t.Fatalf("failed to parse form: %v", err)
+		}
+
+		expected := map[string]string{
+			"body":                    "inline body",
+			"position[position_type]": "text",
+			"position[base_sha]":      "base",
+			"position[start_sha]":     "start",
+			"position[head_sha]":      "head",
+			"position[old_path]":      "src/main.go",
+			"position[new_path]":      "src/main.go",
+			"position[new_line]":      "15",
+		}
+		for key, want := range expected {
+			if got := r.PostForm.Get(key); got != want {
+				t.Fatalf("unexpected %s: got %q want %q", key, got, want)
+			}
+		}
+
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "secret-token", server.Client())
+	err := client.CreateInlineDiscussion(
+		context.Background(),
+		100,
+		42,
+		"inline body",
+		"src/main.go",
+		15,
+		DiffRefs{
+			BaseSHA:  "base",
+			StartSHA: "start",
+			HeadSHA:  "head",
+		},
+	)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+}
+
+func TestCreateInlineDiscussionRejectsInvalidInput(t *testing.T) {
+	t.Parallel()
+
+	client := NewClient("https://gitlab.example.com", "secret-token", nil)
+
+	err := client.CreateInlineDiscussion(context.Background(), 100, 42, "body", "a.go", 1, DiffRefs{})
+	if err == nil || !strings.Contains(err.Error(), "merge request diff refs are incomplete") {
+		t.Fatalf("expected diff refs validation error, got %v", err)
+	}
+}
+
+func TestCreateInlineDiscussionUnauthorized(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "secret-token", server.Client())
+	err := client.CreateInlineDiscussion(
+		context.Background(),
+		100,
+		42,
+		"inline body",
+		"src/main.go",
+		15,
+		DiffRefs{
+			BaseSHA:  "base",
+			StartSHA: "start",
+			HeadSHA:  "head",
+		},
+	)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("expected ErrUnauthorized, got %v", err)
+	}
+}
+
+func TestCreateMergeRequestNoteSuccess(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("unexpected method: %s", r.Method)
+		}
+		if r.URL.Path != "/api/v4/projects/100/merge_requests/42/notes" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		if err := r.ParseForm(); err != nil {
+			t.Fatalf("failed to parse form: %v", err)
+		}
+		if got := r.PostForm.Get("body"); got != "summary body" {
+			t.Fatalf("unexpected note body: %q", got)
+		}
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "secret-token", server.Client())
+	if err := client.CreateMergeRequestNote(context.Background(), 100, 42, "summary body"); err != nil {
+		t.Fatalf("expected no error, got %v", err)
 	}
 }

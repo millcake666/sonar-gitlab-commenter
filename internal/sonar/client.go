@@ -26,6 +26,7 @@ type Client struct {
 type Issue struct {
 	Key      string
 	Rule     string
+	Type     string
 	Severity string
 	Message  string
 	FilePath string
@@ -60,6 +61,7 @@ type issuesSearchResponse struct {
 type apiIssue struct {
 	Key       string `json:"key"`
 	Rule      string `json:"rule"`
+	Type      string `json:"type"`
 	Severity  string `json:"severity"`
 	Message   string `json:"message"`
 	Component string `json:"component"`
@@ -136,17 +138,13 @@ func (c *Client) FetchProjectIssues(ctx context.Context, projectKey string) ([]I
 		}
 
 		for _, issue := range payload.Issues {
-			filePath := extractFilePath(issue.Component)
-			if filePath == "" || issue.Line <= 0 {
-				continue
-			}
-
 			allIssues = append(allIssues, Issue{
 				Key:      issue.Key,
 				Rule:     issue.Rule,
+				Type:     issue.Type,
 				Severity: issue.Severity,
 				Message:  issue.Message,
-				FilePath: filePath,
+				FilePath: extractFilePath(issue.Component),
 				Line:     issue.Line,
 			})
 		}
