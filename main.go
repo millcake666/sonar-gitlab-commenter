@@ -15,6 +15,8 @@ import (
 
 const commentMarker = "<!-- sonar-gitlab-commenter -->"
 
+var summarySeverityOrder = []string{"BLOCKER", "CRITICAL", "MAJOR", "MINOR", "INFO"}
+
 func main() {
 	if err := run(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -76,17 +78,6 @@ func run() error {
 		}
 	}
 
-	if len(projectLevelIssues) > 0 {
-		if err := gitlabClient.CreateMergeRequestNote(
-			ctx,
-			cfg.GitLabProjectID,
-			cfg.GitLabMRIID,
-			formatProjectLevelSummaryComment(projectLevelIssues),
-		); err != nil {
-			return fmt.Errorf("failed to post project-level SonarQube summary: %w", err)
-		}
-	}
-
 	qualityReport, err := client.FetchQualityReport(ctx, cfg.SonarProjectKey)
 	if err != nil {
 		if errors.Is(err, sonar.ErrUnauthorized) {
@@ -96,11 +87,18 @@ func run() error {
 		return fmt.Errorf("failed to retrieve SonarQube quality gate and coverage: %w", err)
 	}
 
+	if err := gitlabClient.CreateMergeRequestNote(
+		ctx,
+		cfg.GitLabProjectID,
+		cfg.GitLabMRIID,
+		formatMergeRequestSummaryComment(qualityReport, issues, projectLevelIssues),
+	); err != nil {
+		return fmt.Errorf("failed to post SonarQube summary note: %w", err)
+	}
+
 	fmt.Printf("Fetched %d SonarQube issues for project %q\n", len(issues), cfg.SonarProjectKey)
 	fmt.Printf("Posted %d inline SonarQube discussions to merge request %d\n", len(inlineIssues), cfg.GitLabMRIID)
-	if len(projectLevelIssues) > 0 {
-		fmt.Printf("Posted summary note for %d project-level SonarQube issues\n", len(projectLevelIssues))
-	}
+	fmt.Printf("Posted summary SonarQube note to merge request %d\n", cfg.GitLabMRIID)
 	fmt.Printf(
 		"Quality gate: %s, coverage: %.2f%%, new code coverage: %.2f%%\n",
 		qualityReport.QualityGateStatus,
@@ -139,23 +137,74 @@ func formatInlineIssueComment(issue sonar.Issue) string {
 	)
 }
 
-func formatProjectLevelSummaryComment(issues []sonar.Issue) string {
+func formatMergeRequestSummaryComment(
+	qualityReport sonar.QualityReport,
+	issues []sonar.Issue,
+	projectLevelIssues []sonar.Issue,
+) string {
+	issuesBySeverity, unknownSeverityCount := countIssuesBySeverity(issues)
+
 	var builder strings.Builder
 	builder.WriteString(commentMarker)
-	builder.WriteString("\n**SonarQube issues without line binding**\n")
+	builder.WriteString("\n**SonarQube summary**\n")
+	builder.WriteString(fmt.Sprintf("- Quality gate: %s\n", formatQualityGateStatus(qualityReport.QualityGateStatus)))
+	builder.WriteString(fmt.Sprintf("- Overall coverage: %.2f%%\n", qualityReport.OverallCoverage))
+	builder.WriteString(fmt.Sprintf("- New code coverage: %.2f%%\n", qualityReport.NewCodeCoverage))
+	builder.WriteString(fmt.Sprintf("- Total issues: %d\n", len(issues)))
+	builder.WriteString("\n**Issues by severity**\n")
+	for _, severity := range summarySeverityOrder {
+		builder.WriteString(fmt.Sprintf("- %s: %d\n", severity, issuesBySeverity[severity]))
+	}
+	if unknownSeverityCount > 0 {
+		builder.WriteString(fmt.Sprintf("- UNKNOWN: %d\n", unknownSeverityCount))
+	}
 
-	for i, issue := range issues {
-		builder.WriteString(
-			fmt.Sprintf(
-				"%d. [%s][%s] %s (rule `%s`)\n",
-				i+1,
-				strings.TrimSpace(issue.Severity),
-				strings.TrimSpace(issue.Type),
-				strings.TrimSpace(issue.Message),
-				strings.TrimSpace(issue.Rule),
-			),
-		)
+	if len(projectLevelIssues) > 0 {
+		builder.WriteString("\n**SonarQube issues without line binding**\n")
+		for i, issue := range projectLevelIssues {
+			builder.WriteString(
+				fmt.Sprintf(
+					"%d. [%s][%s] %s (rule `%s`)\n",
+					i+1,
+					strings.TrimSpace(issue.Severity),
+					strings.TrimSpace(issue.Type),
+					strings.TrimSpace(issue.Message),
+					strings.TrimSpace(issue.Rule),
+				),
+			)
+		}
 	}
 
 	return strings.TrimRight(builder.String(), "\n")
+}
+
+func countIssuesBySeverity(issues []sonar.Issue) (map[string]int, int) {
+	counts := make(map[string]int, len(sonar.AllowedSeverities()))
+	for _, severity := range sonar.AllowedSeverities() {
+		counts[severity] = 0
+	}
+
+	unknownSeverityCount := 0
+	for _, issue := range issues {
+		normalizedSeverity := sonar.NormalizeSeverity(issue.Severity)
+		if _, ok := counts[normalizedSeverity]; !ok {
+			unknownSeverityCount++
+			continue
+		}
+
+		counts[normalizedSeverity]++
+	}
+
+	return counts, unknownSeverityCount
+}
+
+func formatQualityGateStatus(status string) string {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "passed":
+		return "✅ **passed**"
+	case "failed":
+		return "❌ **failed**"
+	default:
+		return "⚠️ **warning**"
+	}
 }
