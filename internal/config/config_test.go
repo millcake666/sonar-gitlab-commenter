@@ -8,23 +8,31 @@ import (
 func TestParseUsesEnvValues(t *testing.T) {
 	t.Parallel()
 
-	cfg, err := Parse(nil, mapGetenv(map[string]string{
-		"SONAR_HOST_URL":    "https://sonar.example.com",
-		"SONAR_TOKEN":       "env-token",
-		"SONAR_PROJECT_KEY": "env-project",
-	}))
+	cfg, err := Parse(nil, mapGetenv(baseEnv()))
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
 
 	if cfg.SonarURL != "https://sonar.example.com" {
-		t.Fatalf("unexpected URL: %q", cfg.SonarURL)
+		t.Fatalf("unexpected Sonar URL: %q", cfg.SonarURL)
 	}
-	if cfg.SonarToken != "env-token" {
-		t.Fatalf("unexpected token: %q", cfg.SonarToken)
+	if cfg.SonarToken != "env-sonar-token" {
+		t.Fatalf("unexpected Sonar token: %q", cfg.SonarToken)
 	}
 	if cfg.SonarProjectKey != "env-project" {
-		t.Fatalf("unexpected project key: %q", cfg.SonarProjectKey)
+		t.Fatalf("unexpected Sonar project key: %q", cfg.SonarProjectKey)
+	}
+	if cfg.GitLabURL != "https://gitlab.example.com" {
+		t.Fatalf("unexpected GitLab URL: %q", cfg.GitLabURL)
+	}
+	if cfg.GitLabToken != "env-gitlab-token" {
+		t.Fatalf("unexpected GitLab token: %q", cfg.GitLabToken)
+	}
+	if cfg.GitLabProjectID != 100 {
+		t.Fatalf("unexpected GitLab project ID: %d", cfg.GitLabProjectID)
+	}
+	if cfg.GitLabMRIID != 42 {
+		t.Fatalf("unexpected GitLab MR IID: %d", cfg.GitLabMRIID)
 	}
 }
 
@@ -32,35 +40,52 @@ func TestParseFlagsOverrideEnv(t *testing.T) {
 	t.Parallel()
 
 	cfg, err := Parse([]string{
-		"--sonar-url=https://flag.example.com",
-		"--sonar-token=flag-token",
+		"--sonar-url=https://sonar-flag.example.com",
+		"--sonar-token=flag-sonar-token",
 		"--sonar-project-key=flag-project",
-	}, mapGetenv(map[string]string{
-		"SONAR_HOST_URL":    "https://env.example.com",
-		"SONAR_TOKEN":       "env-token",
-		"SONAR_PROJECT_KEY": "env-project",
-	}))
+		"--gitlab-url=https://gitlab-flag.example.com",
+		"--gitlab-token=flag-gitlab-token",
+		"--project-id=200",
+		"--mr-iid=7",
+	}, mapGetenv(baseEnv()))
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
 
-	if cfg.SonarURL != "https://flag.example.com" {
-		t.Fatalf("unexpected URL: %q", cfg.SonarURL)
+	if cfg.SonarURL != "https://sonar-flag.example.com" {
+		t.Fatalf("unexpected Sonar URL: %q", cfg.SonarURL)
 	}
-	if cfg.SonarToken != "flag-token" {
-		t.Fatalf("unexpected token: %q", cfg.SonarToken)
+	if cfg.SonarToken != "flag-sonar-token" {
+		t.Fatalf("unexpected Sonar token: %q", cfg.SonarToken)
 	}
 	if cfg.SonarProjectKey != "flag-project" {
-		t.Fatalf("unexpected project key: %q", cfg.SonarProjectKey)
+		t.Fatalf("unexpected Sonar project key: %q", cfg.SonarProjectKey)
+	}
+	if cfg.GitLabURL != "https://gitlab-flag.example.com" {
+		t.Fatalf("unexpected GitLab URL: %q", cfg.GitLabURL)
+	}
+	if cfg.GitLabToken != "flag-gitlab-token" {
+		t.Fatalf("unexpected GitLab token: %q", cfg.GitLabToken)
+	}
+	if cfg.GitLabProjectID != 200 {
+		t.Fatalf("unexpected GitLab project ID: %d", cfg.GitLabProjectID)
+	}
+	if cfg.GitLabMRIID != 7 {
+		t.Fatalf("unexpected GitLab MR IID: %d", cfg.GitLabMRIID)
 	}
 }
 
-func TestParseMissingRequiredFields(t *testing.T) {
+func TestParseMissingRequiredSonarFields(t *testing.T) {
 	t.Parallel()
 
-	_, err := Parse(nil, mapGetenv(map[string]string{}))
+	env := baseEnv()
+	delete(env, "SONAR_HOST_URL")
+	delete(env, "SONAR_TOKEN")
+	delete(env, "SONAR_PROJECT_KEY")
+
+	_, err := Parse(nil, mapGetenv(env))
 	if err == nil {
-		t.Fatal("expected error for missing required fields")
+		t.Fatal("expected error for missing required SonarQube fields")
 	}
 
 	errText := err.Error()
@@ -71,14 +96,82 @@ func TestParseMissingRequiredFields(t *testing.T) {
 	}
 }
 
+func TestParseMissingRequiredGitLabFields(t *testing.T) {
+	t.Parallel()
+
+	env := baseEnv()
+	delete(env, "GITLAB_URL")
+	delete(env, "GITLAB_TOKEN")
+
+	_, err := Parse(nil, mapGetenv(env))
+	if err == nil {
+		t.Fatal("expected error for missing required GitLab fields")
+	}
+
+	errText := err.Error()
+	for _, field := range []string{"gitlab-url", "gitlab-token"} {
+		if !strings.Contains(errText, field) {
+			t.Fatalf("error %q does not mention %q", errText, field)
+		}
+	}
+}
+
+func TestParseMissingMergeRequestContext(t *testing.T) {
+	t.Parallel()
+
+	env := baseEnv()
+	delete(env, "CI_PROJECT_ID")
+	delete(env, "CI_MERGE_REQUEST_IID")
+
+	_, err := Parse(nil, mapGetenv(env))
+	if err == nil {
+		t.Fatal("expected error for missing MR context")
+	}
+
+	errText := err.Error()
+	for _, field := range []string{"project-id", "mr-iid"} {
+		if !strings.Contains(errText, field) {
+			t.Fatalf("error %q does not mention %q", errText, field)
+		}
+	}
+}
+
+func TestParseRejectsInvalidProjectID(t *testing.T) {
+	t.Parallel()
+
+	_, err := Parse([]string{"--project-id=abc"}, mapGetenv(baseEnv()))
+	if err == nil {
+		t.Fatal("expected error for invalid project ID")
+	}
+
+	errText := err.Error()
+	for _, expected := range []string{"invalid project ID", "abc"} {
+		if !strings.Contains(errText, expected) {
+			t.Fatalf("error %q does not contain %q", errText, expected)
+		}
+	}
+}
+
+func TestParseRejectsInvalidMRIID(t *testing.T) {
+	t.Parallel()
+
+	_, err := Parse([]string{"--mr-iid=0"}, mapGetenv(baseEnv()))
+	if err == nil {
+		t.Fatal("expected error for invalid MR IID")
+	}
+
+	errText := err.Error()
+	for _, expected := range []string{"invalid merge request IID", "0"} {
+		if !strings.Contains(errText, expected) {
+			t.Fatalf("error %q does not contain %q", errText, expected)
+		}
+	}
+}
+
 func TestParseSeverityThresholdDefaultsToNoFiltering(t *testing.T) {
 	t.Parallel()
 
-	cfg, err := Parse(nil, mapGetenv(map[string]string{
-		"SONAR_HOST_URL":    "https://sonar.example.com",
-		"SONAR_TOKEN":       "env-token",
-		"SONAR_PROJECT_KEY": "env-project",
-	}))
+	cfg, err := Parse(nil, mapGetenv(baseEnv()))
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -107,11 +200,7 @@ func TestParseSeverityThresholdAcceptsSupportedValues(t *testing.T) {
 		t.Run(tc.flagValue, func(t *testing.T) {
 			t.Parallel()
 
-			cfg, err := Parse([]string{"--severity-threshold=" + tc.flagValue}, mapGetenv(map[string]string{
-				"SONAR_HOST_URL":    "https://sonar.example.com",
-				"SONAR_TOKEN":       "env-token",
-				"SONAR_PROJECT_KEY": "env-project",
-			}))
+			cfg, err := Parse([]string{"--severity-threshold=" + tc.flagValue}, mapGetenv(baseEnv()))
 			if err != nil {
 				t.Fatalf("expected no error, got %v", err)
 			}
@@ -126,11 +215,7 @@ func TestParseSeverityThresholdAcceptsSupportedValues(t *testing.T) {
 func TestParseSeverityThresholdRejectsUnsupportedValue(t *testing.T) {
 	t.Parallel()
 
-	_, err := Parse([]string{"--severity-threshold=SEVERE"}, mapGetenv(map[string]string{
-		"SONAR_HOST_URL":    "https://sonar.example.com",
-		"SONAR_TOKEN":       "env-token",
-		"SONAR_PROJECT_KEY": "env-project",
-	}))
+	_, err := Parse([]string{"--severity-threshold=SEVERE"}, mapGetenv(baseEnv()))
 	if err == nil {
 		t.Fatal("expected error for unsupported severity threshold")
 	}
@@ -144,6 +229,18 @@ func TestParseSeverityThresholdRejectsUnsupportedValue(t *testing.T) {
 		if !strings.Contains(errText, expected) {
 			t.Fatalf("error %q does not contain %q", errText, expected)
 		}
+	}
+}
+
+func baseEnv() map[string]string {
+	return map[string]string{
+		"SONAR_HOST_URL":       "https://sonar.example.com",
+		"SONAR_TOKEN":          "env-sonar-token",
+		"SONAR_PROJECT_KEY":    "env-project",
+		"GITLAB_URL":           "https://gitlab.example.com",
+		"GITLAB_TOKEN":         "env-gitlab-token",
+		"CI_PROJECT_ID":        "100",
+		"CI_MERGE_REQUEST_IID": "42",
 	}
 }
 

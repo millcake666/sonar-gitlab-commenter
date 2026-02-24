@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"sonar-gitlab-commenter/internal/config"
+	"sonar-gitlab-commenter/internal/gitlab"
 	"sonar-gitlab-commenter/internal/sonar"
 )
 
@@ -24,10 +25,19 @@ func run() error {
 		return err
 	}
 
+	gitlabClient := gitlab.NewClient(cfg.GitLabURL, cfg.GitLabToken, nil)
 	client := sonar.NewClient(cfg.SonarURL, cfg.SonarToken, nil)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+
+	if err := gitlabClient.ValidateMergeRequest(ctx, cfg.GitLabProjectID, cfg.GitLabMRIID); err != nil {
+		if errors.Is(err, gitlab.ErrUnauthorized) {
+			return fmt.Errorf("failed to authenticate in GitLab API: %w", err)
+		}
+
+		return fmt.Errorf("failed to connect to GitLab API: %w", err)
+	}
 
 	if err := client.ValidateAuthentication(ctx); err != nil {
 		if errors.Is(err, sonar.ErrUnauthorized) {
@@ -63,6 +73,7 @@ func run() error {
 		qualityReport.OverallCoverage,
 		qualityReport.NewCodeCoverage,
 	)
+	fmt.Printf("Resolved GitLab merge request: project_id=%d, mr_iid=%d\n", cfg.GitLabProjectID, cfg.GitLabMRIID)
 
 	return nil
 }
