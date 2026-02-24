@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -26,8 +27,21 @@ func main() {
 }
 
 func run() error {
-	cfg, err := config.Parse(os.Args[1:], os.Getenv)
+	return runWith(os.Args[1:], os.Getenv, os.Stdout)
+}
+
+func runWith(args []string, getenv func(string) string, stdout io.Writer) error {
+	cfg, err := config.Parse(args, getenv)
 	if err != nil {
+		var helpErr *config.HelpError
+		if errors.As(err, &helpErr) {
+			if _, writeErr := fmt.Fprint(stdout, helpErr.Message); writeErr != nil {
+				return fmt.Errorf("failed to write help output: %w", writeErr)
+			}
+
+			return nil
+		}
+
 		return err
 	}
 
@@ -64,29 +78,6 @@ func run() error {
 	}
 	issues = sonar.FilterIssuesBySeverity(issues, cfg.SeverityThreshold)
 	inlineIssues, projectLevelIssues := splitIssuesByLineBinding(issues)
-	resolvedDiscussionsCount, err := resolvePreviousSonarDiscussions(
-		ctx,
-		gitlabClient,
-		cfg.GitLabProjectID,
-		cfg.GitLabMRIID,
-	)
-	if err != nil {
-		return fmt.Errorf("failed to resolve previous SonarQube discussions: %w", err)
-	}
-
-	for _, issue := range inlineIssues {
-		if err := gitlabClient.CreateInlineDiscussion(
-			ctx,
-			cfg.GitLabProjectID,
-			cfg.GitLabMRIID,
-			formatInlineIssueComment(issue),
-			issue.FilePath,
-			issue.Line,
-			mergeRequest.DiffRefs,
-		); err != nil {
-			return fmt.Errorf("failed to post inline discussion for SonarQube issue %q: %w", issue.Key, err)
-		}
-	}
 
 	qualityReport, err := client.FetchQualityReport(ctx, cfg.SonarProjectKey)
 	if err != nil {
@@ -97,33 +88,109 @@ func run() error {
 		return fmt.Errorf("failed to retrieve SonarQube quality gate and coverage: %w", err)
 	}
 
-	summaryBody := formatMergeRequestSummaryComment(qualityReport, issues, projectLevelIssues)
-	summaryUpdated, err := upsertSummaryNote(
-		ctx,
-		gitlabClient,
-		cfg.GitLabProjectID,
-		cfg.GitLabMRIID,
-		summaryBody,
-	)
-	if err != nil {
-		return fmt.Errorf("failed to post SonarQube summary note: %w", err)
-	}
-	summaryAction := "Posted"
-	if summaryUpdated {
-		summaryAction = "Updated"
+	resolvedDiscussionsCount := 0
+	postedInlineCount := 0
+	publishedCommentsCount := 0
+	summaryAction := "Skipped (dry-run)"
+
+	if cfg.DryRun {
+		if err := writeOutput(stdout, "Dry-run enabled: skipping GitLab discussion resolution and comment publishing\n"); err != nil {
+			return err
+		}
+	} else {
+		resolvedDiscussionsCount, err = resolvePreviousSonarDiscussions(
+			ctx,
+			gitlabClient,
+			cfg.GitLabProjectID,
+			cfg.GitLabMRIID,
+		)
+		if err != nil {
+			return fmt.Errorf("failed to resolve previous SonarQube discussions: %w", err)
+		}
+
+		for _, issue := range inlineIssues {
+			if err := gitlabClient.CreateInlineDiscussion(
+				ctx,
+				cfg.GitLabProjectID,
+				cfg.GitLabMRIID,
+				formatInlineIssueComment(issue),
+				issue.FilePath,
+				issue.Line,
+				mergeRequest.DiffRefs,
+			); err != nil {
+				return fmt.Errorf("failed to post inline discussion for SonarQube issue %q: %w", issue.Key, err)
+			}
+		}
+
+		postedInlineCount = len(inlineIssues)
+		publishedCommentsCount = postedInlineCount
+
+		summaryBody := formatMergeRequestSummaryComment(qualityReport, issues, projectLevelIssues)
+		summaryUpdated, err := upsertSummaryNote(
+			ctx,
+			gitlabClient,
+			cfg.GitLabProjectID,
+			cfg.GitLabMRIID,
+			summaryBody,
+		)
+		if err != nil {
+			return fmt.Errorf("failed to post SonarQube summary note: %w", err)
+		}
+		summaryAction = "Posted"
+		if summaryUpdated {
+			summaryAction = "Updated"
+		} else {
+			publishedCommentsCount++
+		}
 	}
 
-	fmt.Printf("Fetched %d SonarQube issues for project %q\n", len(issues), cfg.SonarProjectKey)
-	fmt.Printf("Resolved %d previous SonarQube discussions in merge request %d\n", resolvedDiscussionsCount, cfg.GitLabMRIID)
-	fmt.Printf("Posted %d inline SonarQube discussions to merge request %d\n", len(inlineIssues), cfg.GitLabMRIID)
-	fmt.Printf("%s summary SonarQube note in merge request %d\n", summaryAction, cfg.GitLabMRIID)
-	fmt.Printf(
+	if err := writeOutput(stdout, "Action log: found %d issues, published %d comments\n", len(issues), publishedCommentsCount); err != nil {
+		return err
+	}
+	if err := writeOutput(
+		stdout,
+		"Resolved %d previous SonarQube discussions in merge request %d\n",
+		resolvedDiscussionsCount,
+		cfg.GitLabMRIID,
+	); err != nil {
+		return err
+	}
+	if err := writeOutput(
+		stdout,
+		"Posted %d inline SonarQube discussions to merge request %d\n",
+		postedInlineCount,
+		cfg.GitLabMRIID,
+	); err != nil {
+		return err
+	}
+	if err := writeOutput(
+		stdout,
+		"%s summary SonarQube note in merge request %d\n",
+		summaryAction,
+		cfg.GitLabMRIID,
+	); err != nil {
+		return err
+	}
+	if err := writeOutput(
+		stdout,
 		"Quality gate: %s, coverage: %.2f%%, new code coverage: %.2f%%\n",
 		qualityReport.QualityGateStatus,
 		qualityReport.OverallCoverage,
 		qualityReport.NewCodeCoverage,
-	)
-	fmt.Printf("Resolved GitLab merge request: project_id=%d, mr_iid=%d\n", cfg.GitLabProjectID, cfg.GitLabMRIID)
+	); err != nil {
+		return err
+	}
+	if err := writeOutput(stdout, "Resolved GitLab merge request: project_id=%d, mr_iid=%d\n", cfg.GitLabProjectID, cfg.GitLabMRIID); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func writeOutput(stdout io.Writer, format string, args ...any) error {
+	if _, err := fmt.Fprintf(stdout, format, args...); err != nil {
+		return fmt.Errorf("failed to write CLI output: %w", err)
+	}
 
 	return nil
 }

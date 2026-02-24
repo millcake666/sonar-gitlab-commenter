@@ -1,6 +1,8 @@
 package config
 
 import (
+	"bytes"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -16,10 +18,19 @@ type Config struct {
 	SonarToken        string
 	SonarProjectKey   string
 	SeverityThreshold string
+	DryRun            bool
 	GitLabURL         string
 	GitLabToken       string
 	GitLabProjectID   int
 	GitLabMRIID       int
+}
+
+type HelpError struct {
+	Message string
+}
+
+func (e *HelpError) Error() string {
+	return "help requested"
 }
 
 func Parse(args []string, getenv func(string) string) (Config, error) {
@@ -32,20 +43,28 @@ func Parse(args []string, getenv func(string) string) (Config, error) {
 	}
 	projectID := strings.TrimSpace(getenv("CI_PROJECT_ID"))
 	mrIID := strings.TrimSpace(getenv("CI_MERGE_REQUEST_IID"))
+	var usageBuffer bytes.Buffer
 
 	fs := flag.NewFlagSet("sonar-gitlab-commenter", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
+	fs.SetOutput(&usageBuffer)
+	fs.Usage = func() {
+		_, _ = io.WriteString(fs.Output(), helpText())
+	}
 
 	fs.StringVar(&cfg.SonarURL, "sonar-url", cfg.SonarURL, "SonarQube server URL (env: SONAR_HOST_URL)")
 	fs.StringVar(&cfg.SonarToken, "sonar-token", cfg.SonarToken, "SonarQube access token (env: SONAR_TOKEN)")
 	fs.StringVar(&cfg.SonarProjectKey, "sonar-project-key", cfg.SonarProjectKey, "SonarQube project key (env: SONAR_PROJECT_KEY)")
 	fs.StringVar(&cfg.SeverityThreshold, "severity-threshold", "", "Minimum SonarQube issue severity to include (INFO, MINOR, MAJOR, CRITICAL, BLOCKER)")
+	fs.BoolVar(&cfg.DryRun, "dry-run", false, "Run without resolving or posting GitLab comments")
 	fs.StringVar(&cfg.GitLabURL, "gitlab-url", cfg.GitLabURL, "GitLab server URL (env: GITLAB_URL)")
 	fs.StringVar(&cfg.GitLabToken, "gitlab-token", cfg.GitLabToken, "GitLab access token (env: GITLAB_TOKEN)")
 	fs.StringVar(&projectID, "project-id", projectID, "GitLab project ID (env: CI_PROJECT_ID)")
 	fs.StringVar(&mrIID, "mr-iid", mrIID, "GitLab merge request IID (env: CI_MERGE_REQUEST_IID)")
 
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return Config{}, &HelpError{Message: helpOutput(&usageBuffer)}
+		}
 		return Config{}, fmt.Errorf("invalid CLI arguments: %w", err)
 	}
 
@@ -108,6 +127,41 @@ func Parse(args []string, getenv func(string) string) (Config, error) {
 	}
 
 	return cfg, nil
+}
+
+func helpOutput(buffer *bytes.Buffer) string {
+	if buffer.Len() == 0 {
+		return helpText()
+	}
+
+	return buffer.String()
+}
+
+func helpText() string {
+	return `Usage:
+  sonar-gitlab-commenter [flags]
+
+Flags:
+  --sonar-url string             SonarQube server URL (env: SONAR_HOST_URL)
+  --sonar-token string           SonarQube access token (env: SONAR_TOKEN)
+  --sonar-project-key string     SonarQube project key (env: SONAR_PROJECT_KEY)
+  --severity-threshold string    Minimum issue severity (INFO, MINOR, MAJOR, CRITICAL, BLOCKER)
+  --dry-run                      Run without resolving or posting GitLab comments
+  --gitlab-url string            GitLab server URL (env: GITLAB_URL)
+  --gitlab-token string          GitLab access token (env: GITLAB_TOKEN)
+  --project-id string            GitLab project ID (env: CI_PROJECT_ID)
+  --mr-iid string                GitLab merge request IID (env: CI_MERGE_REQUEST_IID)
+  -h, --help                     Show this help message
+
+Environment Variables:
+  SONAR_HOST_URL
+  SONAR_TOKEN
+  SONAR_PROJECT_KEY
+  GITLAB_URL
+  GITLAB_TOKEN
+  CI_PROJECT_ID
+  CI_MERGE_REQUEST_IID
+`
 }
 
 func missingSonarFields(cfg Config) []string {

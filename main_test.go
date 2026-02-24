@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"sonar-gitlab-commenter/internal/gitlab"
@@ -230,6 +232,97 @@ func TestUpsertSummaryNoteUpdatesExistingSummary(t *testing.T) {
 	}
 	if updateCalls != 1 {
 		t.Fatalf("expected one update call, got %d", updateCalls)
+	}
+}
+
+func TestRunWithHelpReturnsSuccessAndWritesDocumentation(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	err := runWith(
+		[]string{"--help"},
+		func(string) string { return "" },
+		&output,
+	)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	helpText := output.String()
+	for _, expected := range []string{"--sonar-url", "--dry-run", "SONAR_HOST_URL", "CI_PROJECT_ID"} {
+		if !strings.Contains(helpText, expected) {
+			t.Fatalf("help output %q does not contain %q", helpText, expected)
+		}
+	}
+}
+
+func TestRunWithDryRunSkipsGitLabWriteOperations(t *testing.T) {
+	t.Parallel()
+
+	var writeCalls int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v4/projects/100/merge_requests/42":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"iid":42,"diff_refs":{"base_sha":"base","start_sha":"start","head_sha":"head"}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/authentication/validate":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"valid":true}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/issues/search":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{
+				"issues":[
+					{"key":"ISSUE-1","rule":"go:S100","type":"CODE_SMELL","severity":"MAJOR","message":"inline issue","component":"project:main.go","line":12},
+					{"key":"ISSUE-2","rule":"go:S200","type":"BUG","severity":"MINOR","message":"project issue","component":"project"}
+				],
+				"paging":{"pageIndex":1,"pageSize":500,"total":2}
+			}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/qualitygates/project_status":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"projectStatus":{"status":"OK"}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/measures/component":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"component":{"measures":[{"metric":"coverage","value":"80.5"},{"metric":"new_coverage","value":"70.0"}]}}`))
+		case r.Method == http.MethodPost || r.Method == http.MethodPut:
+			atomic.AddInt32(&writeCalls, 1)
+			t.Fatalf("did not expect write request in dry-run mode: %s %s", r.Method, r.URL.Path)
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var output bytes.Buffer
+	err := runWith(
+		[]string{
+			"--sonar-url=" + server.URL,
+			"--sonar-token=token",
+			"--sonar-project-key=project",
+			"--gitlab-url=" + server.URL,
+			"--gitlab-token=token",
+			"--project-id=100",
+			"--mr-iid=42",
+			"--dry-run",
+		},
+		func(string) string { return "" },
+		&output,
+	)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	if got := atomic.LoadInt32(&writeCalls); got != 0 {
+		t.Fatalf("expected no GitLab write calls, got %d", got)
+	}
+
+	logOutput := output.String()
+	for _, expected := range []string{
+		"Dry-run enabled",
+		"Action log: found 2 issues, published 0 comments",
+	} {
+		if !strings.Contains(logOutput, expected) {
+			t.Fatalf("output %q does not contain %q", logOutput, expected)
+		}
 	}
 }
 

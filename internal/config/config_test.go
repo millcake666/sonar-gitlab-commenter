@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -228,6 +229,52 @@ func TestParseSeverityThresholdRejectsUnsupportedValue(t *testing.T) {
 	} {
 		if !strings.Contains(errText, expected) {
 			t.Fatalf("error %q does not contain %q", errText, expected)
+		}
+	}
+}
+
+func TestParseDryRunFlag(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := Parse([]string{"--dry-run"}, mapGetenv(baseEnv()))
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	if !cfg.DryRun {
+		t.Fatal("expected dry-run mode to be enabled")
+	}
+}
+
+func TestParseHelpReturnsDocumentation(t *testing.T) {
+	t.Parallel()
+
+	_, err := Parse([]string{"--help"}, mapGetenv(baseEnv()))
+	if err == nil {
+		t.Fatal("expected help error")
+	}
+
+	var helpErr *HelpError
+	if !errors.As(err, &helpErr) {
+		t.Fatalf("expected HelpError, got %v", err)
+	}
+
+	for _, expected := range []string{
+		"--sonar-url",
+		"--dry-run",
+		"--severity-threshold",
+		"--gitlab-url",
+		"--project-id",
+		"SONAR_HOST_URL",
+		"SONAR_TOKEN",
+		"SONAR_PROJECT_KEY",
+		"GITLAB_URL",
+		"GITLAB_TOKEN",
+		"CI_PROJECT_ID",
+		"CI_MERGE_REQUEST_IID",
+	} {
+		if !strings.Contains(helpErr.Message, expected) {
+			t.Fatalf("help output %q does not contain %q", helpErr.Message, expected)
 		}
 	}
 }
