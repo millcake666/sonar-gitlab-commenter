@@ -6,12 +6,15 @@ import (
 	"io"
 	"net/url"
 	"strings"
+
+	"sonar-gitlab-commenter/internal/sonar"
 )
 
 type Config struct {
-	SonarURL        string
-	SonarToken      string
-	SonarProjectKey string
+	SonarURL          string
+	SonarToken        string
+	SonarProjectKey   string
+	SeverityThreshold string
 }
 
 func Parse(args []string, getenv func(string) string) (Config, error) {
@@ -27,6 +30,7 @@ func Parse(args []string, getenv func(string) string) (Config, error) {
 	fs.StringVar(&cfg.SonarURL, "sonar-url", cfg.SonarURL, "SonarQube server URL (env: SONAR_HOST_URL)")
 	fs.StringVar(&cfg.SonarToken, "sonar-token", cfg.SonarToken, "SonarQube access token (env: SONAR_TOKEN)")
 	fs.StringVar(&cfg.SonarProjectKey, "sonar-project-key", cfg.SonarProjectKey, "SonarQube project key (env: SONAR_PROJECT_KEY)")
+	fs.StringVar(&cfg.SeverityThreshold, "severity-threshold", "", "Minimum SonarQube issue severity to include (INFO, MINOR, MAJOR, CRITICAL, BLOCKER)")
 
 	if err := fs.Parse(args); err != nil {
 		return Config{}, fmt.Errorf("invalid CLI arguments: %w", err)
@@ -39,6 +43,7 @@ func Parse(args []string, getenv func(string) string) (Config, error) {
 	cfg.SonarURL = strings.TrimSpace(cfg.SonarURL)
 	cfg.SonarToken = strings.TrimSpace(cfg.SonarToken)
 	cfg.SonarProjectKey = strings.TrimSpace(cfg.SonarProjectKey)
+	cfg.SeverityThreshold = sonar.NormalizeSeverity(cfg.SeverityThreshold)
 
 	if missing := missingFields(cfg); len(missing) > 0 {
 		return Config{}, fmt.Errorf(
@@ -49,6 +54,14 @@ func Parse(args []string, getenv func(string) string) (Config, error) {
 
 	if _, err := url.ParseRequestURI(cfg.SonarURL); err != nil {
 		return Config{}, fmt.Errorf("invalid SonarQube URL %q: %w", cfg.SonarURL, err)
+	}
+
+	if cfg.SeverityThreshold != "" && !sonar.IsValidSeverity(cfg.SeverityThreshold) {
+		return Config{}, fmt.Errorf(
+			"invalid value for --severity-threshold: %q (allowed: %s)",
+			cfg.SeverityThreshold,
+			strings.Join(sonar.AllowedSeverities(), ", "),
+		)
 	}
 
 	return cfg, nil

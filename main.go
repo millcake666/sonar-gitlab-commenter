@@ -45,6 +45,7 @@ func run() error {
 
 		return fmt.Errorf("failed to retrieve SonarQube issues: %w", err)
 	}
+	issues = sonar.FilterIssuesBySeverity(issues, cfg.SeverityThreshold)
 
 	qualityReport, err := client.FetchQualityReport(ctx, cfg.SonarProjectKey)
 	if err != nil {
