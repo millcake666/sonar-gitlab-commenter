@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -110,6 +111,142 @@ func TestFetchProjectIssuesUnauthorized(t *testing.T) {
 
 	client := NewClient(server.URL, "secret-token", server.Client())
 	_, err := client.FetchProjectIssues(context.Background(), "demo")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+
+	if !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("expected ErrUnauthorized, got %v", err)
+	}
+}
+
+func TestFetchQualityReport(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		switch r.URL.Path {
+		case "/api/qualitygates/project_status":
+			if got := r.URL.Query().Get("projectKey"); got != "demo" {
+				t.Fatalf("unexpected projectKey query for quality gate: %q", got)
+			}
+
+			_, _ = w.Write([]byte(`{"projectStatus":{"status":"OK"}}`))
+		case "/api/measures/component":
+			if got := r.URL.Query().Get("component"); got != "demo" {
+				t.Fatalf("unexpected component query for measures: %q", got)
+			}
+			if got := r.URL.Query().Get("metricKeys"); got != "coverage,new_coverage" {
+				t.Fatalf("unexpected metricKeys query for measures: %q", got)
+			}
+
+			_, _ = w.Write([]byte(`{
+				"component":{
+					"measures":[
+						{"metric":"coverage","value":"84.3"},
+						{"metric":"new_coverage","value":"78.1"}
+					]
+				}
+			}`))
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "secret-token", server.Client())
+	report, err := client.FetchQualityReport(context.Background(), "demo")
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	if report.QualityGateStatus != "passed" {
+		t.Fatalf("expected quality gate passed, got %q", report.QualityGateStatus)
+	}
+	if report.OverallCoverage != 84.3 {
+		t.Fatalf("expected overall coverage 84.3, got %v", report.OverallCoverage)
+	}
+	if report.NewCodeCoverage != 78.1 {
+		t.Fatalf("expected new code coverage 78.1, got %v", report.NewCodeCoverage)
+	}
+}
+
+func TestFetchQualityReportWarningStatus(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		switch r.URL.Path {
+		case "/api/qualitygates/project_status":
+			_, _ = w.Write([]byte(`{"projectStatus":{"status":"WARN"}}`))
+		case "/api/measures/component":
+			_, _ = w.Write([]byte(`{
+				"component":{"measures":[
+					{"metric":"coverage","value":"100.0"},
+					{"metric":"new_coverage","value":"99.9"}
+				]}
+			}`))
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "secret-token", server.Client())
+	report, err := client.FetchQualityReport(context.Background(), "demo")
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	if report.QualityGateStatus != "warning" {
+		t.Fatalf("expected quality gate warning, got %q", report.QualityGateStatus)
+	}
+}
+
+func TestFetchQualityReportMissingCoverageMetric(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		switch r.URL.Path {
+		case "/api/qualitygates/project_status":
+			_, _ = w.Write([]byte(`{"projectStatus":{"status":"ERROR"}}`))
+		case "/api/measures/component":
+			_, _ = w.Write([]byte(`{
+				"component":{"measures":[
+					{"metric":"coverage","value":"12.5"}
+				]}
+			}`))
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "secret-token", server.Client())
+	_, err := client.FetchQualityReport(context.Background(), "demo")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+
+	if !strings.Contains(err.Error(), "missing SonarQube coverage metrics") {
+		t.Fatalf("expected missing metrics error, got %v", err)
+	}
+}
+
+func TestFetchQualityReportUnauthorized(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "secret-token", server.Client())
+	_, err := client.FetchQualityReport(context.Background(), "demo")
 	if err == nil {
 		t.Fatal("expected error")
 	}

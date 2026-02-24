@@ -46,7 +46,22 @@ func run() error {
 		return fmt.Errorf("failed to retrieve SonarQube issues: %w", err)
 	}
 
+	qualityReport, err := client.FetchQualityReport(ctx, cfg.SonarProjectKey)
+	if err != nil {
+		if errors.Is(err, sonar.ErrUnauthorized) {
+			return fmt.Errorf("failed to authenticate in SonarQube API: %w", err)
+		}
+
+		return fmt.Errorf("failed to retrieve SonarQube quality gate and coverage: %w", err)
+	}
+
 	fmt.Printf("Fetched %d SonarQube issues with file and line binding for project %q\n", len(issues), cfg.SonarProjectKey)
+	fmt.Printf(
+		"Quality gate: %s, coverage: %.2f%%, new code coverage: %.2f%%\n",
+		qualityReport.QualityGateStatus,
+		qualityReport.OverallCoverage,
+		qualityReport.NewCodeCoverage,
+	)
 
 	return nil
 }
