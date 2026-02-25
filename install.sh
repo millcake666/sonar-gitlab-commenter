@@ -71,16 +71,17 @@ curl -fsSL -o "$CHECKSUMS_PATH" "${BASE_URL}/checksums.txt" || fail "failed to d
 
 CHECKSUM_LINE="$(grep "  ${ASSET_NAME}$" "$CHECKSUMS_PATH" || true)"
 [ -n "$CHECKSUM_LINE" ] || fail "checksum entry not found for ${ASSET_NAME}"
+EXPECTED_SUM="$(printf "%s\n" "$CHECKSUM_LINE" | awk '{print $1}')"
 
 if command -v sha256sum >/dev/null 2>&1; then
-  printf "%s\n" "$CHECKSUM_LINE" | sha256sum -c - >/dev/null
+  ACTUAL_SUM="$(sha256sum "$BIN_PATH" | awk '{print $1}')"
 elif command -v shasum >/dev/null 2>&1; then
-  EXPECTED_SUM="$(printf "%s\n" "$CHECKSUM_LINE" | awk '{print $1}')"
   ACTUAL_SUM="$(shasum -a 256 "$BIN_PATH" | awk '{print $1}')"
-  [ "$EXPECTED_SUM" = "$ACTUAL_SUM" ] || fail "checksum verification failed"
 else
   fail "sha256sum or shasum is required for checksum verification"
 fi
+
+[ "$EXPECTED_SUM" = "$ACTUAL_SUM" ] || fail "checksum verification failed"
 
 chmod +x "$BIN_PATH"
 
