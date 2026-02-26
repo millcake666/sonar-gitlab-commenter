@@ -112,6 +112,59 @@ func TestGetMergeRequestReturnsDiffRefs(t *testing.T) {
 	}
 }
 
+func TestListMergeRequestChangesSuccess(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Fatalf("unexpected method: %s", r.Method)
+		}
+		if r.URL.Path != "/api/v4/projects/100/merge_requests/42/changes" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		if got := r.URL.Query().Get("access_raw_diffs"); got != "true" {
+			t.Fatalf("unexpected access_raw_diffs query: %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"changes":[
+				{"old_path":"src/old.go","new_path":"src/new.go","diff":"@@ -1,1 +1,1 @@\n-old\n+new"}
+			]
+		}`))
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "secret-token", server.Client())
+	changes, err := client.ListMergeRequestChanges(context.Background(), 100, 42)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if len(changes) != 1 {
+		t.Fatalf("expected 1 change, got %d", len(changes))
+	}
+	if changes[0].NewPath != "src/new.go" {
+		t.Fatalf("unexpected new path: %q", changes[0].NewPath)
+	}
+}
+
+func TestListMergeRequestChangesUnauthorized(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "secret-token", server.Client())
+	_, err := client.ListMergeRequestChanges(context.Background(), 100, 42)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("expected ErrUnauthorized, got %v", err)
+	}
+}
+
 func TestCreateInlineDiscussionSuccess(t *testing.T) {
 	t.Parallel()
 
@@ -159,7 +212,9 @@ func TestCreateInlineDiscussionSuccess(t *testing.T) {
 		42,
 		"inline body",
 		"src/main.go",
-		15,
+		"src/main.go",
+		0,  // oldLine: 0 for added lines
+		15, // newLine
 		DiffRefs{
 			BaseSHA:  "base",
 			StartSHA: "start",
@@ -176,7 +231,7 @@ func TestCreateInlineDiscussionRejectsInvalidInput(t *testing.T) {
 
 	client := NewClient("https://gitlab.example.com", "secret-token", nil)
 
-	err := client.CreateInlineDiscussion(context.Background(), 100, 42, "body", "a.go", 1, DiffRefs{})
+	err := client.CreateInlineDiscussion(context.Background(), 100, 42, "body", "a.go", "a.go", 0, 1, DiffRefs{})
 	if err == nil || !strings.Contains(err.Error(), "merge request diff refs are incomplete") {
 		t.Fatalf("expected diff refs validation error, got %v", err)
 	}
@@ -197,7 +252,9 @@ func TestCreateInlineDiscussionUnauthorized(t *testing.T) {
 		42,
 		"inline body",
 		"src/main.go",
-		15,
+		"src/main.go",
+		0,  // oldLine: 0 for added lines
+		15, // newLine
 		DiffRefs{
 			BaseSHA:  "base",
 			StartSHA: "start",
@@ -209,6 +266,42 @@ func TestCreateInlineDiscussionUnauthorized(t *testing.T) {
 	}
 	if !errors.Is(err, ErrUnauthorized) {
 		t.Fatalf("expected ErrUnauthorized, got %v", err)
+	}
+}
+
+func TestCreateInlineDiscussionInvalidLineCode(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(
+			w,
+			`{"message":"400 Bad request - Note {:line_code=>[\"can't be blank\", \"must be a valid line code\"]}"}`,
+			http.StatusBadRequest,
+		)
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "secret-token", server.Client())
+	err := client.CreateInlineDiscussion(
+		context.Background(),
+		100,
+		42,
+		"inline body",
+		"src/main.go",
+		"src/main.go",
+		0,  // oldLine: 0 for added lines
+		15, // newLine
+		DiffRefs{
+			BaseSHA:  "base",
+			StartSHA: "start",
+			HeadSHA:  "head",
+		},
+	)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !errors.Is(err, ErrInvalidInlinePosition) {
+		t.Fatalf("expected ErrInvalidInlinePosition, got %v", err)
 	}
 }
 

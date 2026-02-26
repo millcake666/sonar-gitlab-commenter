@@ -119,6 +119,115 @@ func TestDiscussionContainsMarker(t *testing.T) {
 	}
 }
 
+func TestExtractDiffLines(t *testing.T) {
+	t.Parallel()
+
+	diff := "@@ -5,2 +10,3 @@\n+line 10\n+line 11\n+line 12\n@@ -20,2 +40,2 @@\n-old\n+line 40\n context"
+	lines := extractDiffLines(diff)
+
+	expectedLines := map[int]struct {
+		lineType lineType
+		oldLine  int
+		newLine  int
+	}{
+		10: {lineType: lineTypeAdded, newLine: 10},
+		11: {lineType: lineTypeAdded, newLine: 11},
+		12: {lineType: lineTypeAdded, newLine: 12},
+		40: {lineType: lineTypeAdded, newLine: 40},
+		41: {lineType: lineTypeContext, oldLine: 21, newLine: 41},
+	}
+
+	if len(lines) != len(expectedLines) {
+		t.Fatalf("expected %d visible lines, got %d", len(expectedLines), len(lines))
+	}
+
+	for newLine, expected := range expectedLines {
+		actual, found := lines[newLine]
+		if !found {
+			t.Fatalf("expected line %d not found", newLine)
+		}
+		if actual.lineType != expected.lineType {
+			t.Fatalf("line %d: expected type %d, got %d", newLine, expected.lineType, actual.lineType)
+		}
+		if actual.oldLine != expected.oldLine {
+			t.Fatalf("line %d: expected oldLine %d, got %d", newLine, expected.oldLine, actual.oldLine)
+		}
+		if actual.newLine != expected.newLine {
+			t.Fatalf("line %d: expected newLine %d, got %d", newLine, expected.newLine, actual.newLine)
+		}
+	}
+}
+
+func TestBuildDiffLineIndex(t *testing.T) {
+	t.Parallel()
+
+	changes := []gitlab.MergeRequestChange{
+		{
+			OldPath: "src/old.go",
+			NewPath: "src/new.go",
+			Diff:    "@@ -0,0 +10,2 @@\n+line 10\n+line 11",
+		},
+		{
+			OldPath: "src/main.go",
+			NewPath: "src/main.go",
+			Diff:    "@@ -0,0 +20,1 @@\n+line 20",
+		},
+	}
+
+	index := buildDiffLineIndex(changes)
+
+	if len(index.lines) != 2 {
+		t.Fatalf("expected 2 files in index, got %d", len(index.lines))
+	}
+	if len(index.pathMap) != 2 {
+		t.Fatalf("expected 2 paths in pathMap, got %d", len(index.pathMap))
+	}
+
+	if _, ok := index.lines["src/new.go"][10]; !ok {
+		t.Fatal("expected line 10 in src/new.go")
+	}
+	if _, ok := index.lines["src/new.go"][11]; !ok {
+		t.Fatal("expected line 11 in src/new.go")
+	}
+
+	pathInfo := index.pathMap["src/new.go"]
+	if pathInfo.oldPath != "src/old.go" || pathInfo.newPath != "src/new.go" {
+		t.Fatalf("unexpected path info for src/new.go: %+v", pathInfo)
+	}
+}
+
+func TestFilterIssuesByMRDiff(t *testing.T) {
+	t.Parallel()
+
+	index := diffLineIndex{
+		lines: map[string]map[int]lineInfo{
+			"src/main.go": {
+				12: {lineType: lineTypeAdded, newLine: 12},
+			},
+		},
+		pathMap: map[string]pathInfo{
+			"src/main.go": {
+				oldPath: "src/main.go",
+				newPath: "src/main.go",
+			},
+		},
+	}
+	issues := []sonar.Issue{
+		{Key: "A", FilePath: "src/main.go", Line: 12},
+		{Key: "B", FilePath: "src/main.go", Line: 13},
+		{Key: "C", FilePath: "src/other.go", Line: 12},
+		{Key: "D", FilePath: "src/main.go", Line: 0},
+	}
+
+	filtered := filterIssuesByMRDiff(issues, index)
+	if len(filtered) != 1 {
+		t.Fatalf("expected 1 issue after diff filter, got %d", len(filtered))
+	}
+	if filtered[0].Key != "A" {
+		t.Fatalf("unexpected issue after diff filter: %+v", filtered[0])
+	}
+}
+
 func TestResolvePreviousSonarDiscussionsResolvesOnlyToolThreads(t *testing.T) {
 	t.Parallel()
 
@@ -265,6 +374,13 @@ func TestRunWithDryRunSkipsGitLabWriteOperations(t *testing.T) {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v4/projects/100/merge_requests/42":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"iid":42,"diff_refs":{"base_sha":"base","start_sha":"start","head_sha":"head"}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v4/projects/100/merge_requests/42/changes":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{
+				"changes":[
+					{"old_path":"main.go","new_path":"main.go","diff":"@@ -0,0 +12,1 @@\n+added line"}
+				]
+			}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/api/authentication/validate":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"valid":true}`))
@@ -318,7 +434,174 @@ func TestRunWithDryRunSkipsGitLabWriteOperations(t *testing.T) {
 	logOutput := output.String()
 	for _, expected := range []string{
 		"Dry-run enabled",
-		"Action log: found 2 issues, published 0 comments",
+		"Action log: found 1 issues, published 0 comments",
+	} {
+		if !strings.Contains(logOutput, expected) {
+			t.Fatalf("output %q does not contain %q", logOutput, expected)
+		}
+	}
+}
+
+func TestRunWithLogsFlagPrintsFetchedSonarIssues(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v4/projects/100/merge_requests/42":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"iid":42,"diff_refs":{"base_sha":"base","start_sha":"start","head_sha":"head"}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v4/projects/100/merge_requests/42/changes":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{
+				"changes":[
+					{"old_path":"main.go","new_path":"main.go","diff":"@@ -0,0 +12,1 @@\n+added line"}
+				]
+			}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/authentication/validate":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"valid":true}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/issues/search":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{
+				"issues":[
+					{"key":"ISSUE-LOG-1","rule":"go:S100","type":"CODE_SMELL","severity":"MAJOR","message":"inline issue message","component":"project:main.go","line":12}
+				],
+				"paging":{"pageIndex":1,"pageSize":500,"total":1}
+			}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/qualitygates/project_status":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"projectStatus":{"status":"OK"}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/measures/component":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"component":{"measures":[{"metric":"coverage","value":"80.5"},{"metric":"new_coverage","value":"70.0"}]}}`))
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var output bytes.Buffer
+	err := runWith(
+		[]string{
+			"--sonar-url=" + server.URL,
+			"--sonar-token=token",
+			"--sonar-project-key=project",
+			"--gitlab-url=" + server.URL,
+			"--gitlab-token=token",
+			"--project-id=100",
+			"--mr-iid=42",
+			"--dry-run",
+			"--logs=true",
+		},
+		func(string) string { return "" },
+		&output,
+	)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	logOutput := output.String()
+	for _, expected := range []string{
+		"Fetched SonarQube issues: 1",
+		`Sonar issue #1: key="ISSUE-LOG-1"`,
+		`severity="MAJOR"`,
+		`type="CODE_SMELL"`,
+	} {
+		if !strings.Contains(logOutput, expected) {
+			t.Fatalf("output %q does not contain %q", logOutput, expected)
+		}
+	}
+}
+
+func TestRunWithInlineInvalidPositionFallsBackToSummary(t *testing.T) {
+	t.Parallel()
+
+	summaryNotesCreated := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v4/projects/100/merge_requests/42":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"iid":42,"diff_refs":{"base_sha":"base","start_sha":"start","head_sha":"head"}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v4/projects/100/merge_requests/42/changes":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{
+				"changes":[
+					{"old_path":"main.go","new_path":"main.go","diff":"@@ -0,0 +12,1 @@\n+added line"}
+				]
+			}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/authentication/validate":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"valid":true}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/issues/search":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{
+				"issues":[
+					{"key":"ISSUE-LINE-CODE","rule":"go:S100","type":"CODE_SMELL","severity":"MAJOR","message":"inline issue","component":"project:main.go","line":12}
+				],
+				"paging":{"pageIndex":1,"pageSize":500,"total":1}
+			}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/qualitygates/project_status":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"projectStatus":{"status":"OK"}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/measures/component":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"component":{"measures":[{"metric":"coverage","value":"80.5"},{"metric":"new_coverage","value":"70.0"}]}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v4/projects/100/merge_requests/42/discussions":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[]`))
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v4/projects/100/merge_requests/42/discussions":
+			http.Error(
+				w,
+				`{"message":"400 Bad request - Note {:line_code=>[\"can't be blank\", \"must be a valid line code\"]}"}`,
+				http.StatusBadRequest,
+			)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v4/projects/100/merge_requests/42/notes":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[]`))
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v4/projects/100/merge_requests/42/notes":
+			if err := r.ParseForm(); err != nil {
+				t.Fatalf("failed to parse form: %v", err)
+			}
+			body := r.PostForm.Get("body")
+			if !strings.Contains(body, "without line binding") {
+				t.Fatalf("expected summary to contain project-level section, got %q", body)
+			}
+			if !strings.Contains(body, "inline issue") {
+				t.Fatalf("expected summary to include skipped issue message, got %q", body)
+			}
+			summaryNotesCreated++
+			w.WriteHeader(http.StatusCreated)
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var output bytes.Buffer
+	err := runWith(
+		[]string{
+			"--sonar-url=" + server.URL,
+			"--sonar-token=token",
+			"--sonar-project-key=project",
+			"--gitlab-url=" + server.URL,
+			"--gitlab-token=token",
+			"--project-id=100",
+			"--mr-iid=42",
+		},
+		func(string) string { return "" },
+		&output,
+	)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if summaryNotesCreated != 1 {
+		t.Fatalf("expected one summary note create, got %d", summaryNotesCreated)
+	}
+
+	logOutput := output.String()
+	for _, expected := range []string{
+		"Action log: found 1 issues, published 1 comments",
+		"Posted 0 inline SonarQube discussions to merge request 42",
 	} {
 		if !strings.Contains(logOutput, expected) {
 			t.Fatalf("output %q does not contain %q", logOutput, expected)

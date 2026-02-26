@@ -208,6 +208,39 @@ func TestFetchQualityReportWarningStatus(t *testing.T) {
 	}
 }
 
+func TestFetchQualityReportEmptyNewCoverage(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		switch r.URL.Path {
+		case "/api/qualitygates/project_status":
+			_, _ = w.Write([]byte(`{"projectStatus":{"status":"OK"}}`))
+		case "/api/measures/component":
+			_, _ = w.Write([]byte(`{
+				"component":{"measures":[
+					{"metric":"coverage","value":"82.7"},
+					{"metric":"new_coverage","value":""}
+				]}
+			}`))
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "secret-token", server.Client())
+	report, err := client.FetchQualityReport(context.Background(), "demo")
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	if report.NewCodeCoverage != 0 {
+		t.Fatalf("expected empty new_coverage treated as 0, got %v", report.NewCodeCoverage)
+	}
+}
+
 func TestFetchQualityReportMissingCoverageMetric(t *testing.T) {
 	t.Parallel()
 

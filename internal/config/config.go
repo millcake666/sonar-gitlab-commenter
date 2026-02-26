@@ -19,6 +19,7 @@ type Config struct {
 	SonarProjectKey   string
 	SeverityThreshold string
 	DryRun            bool
+	Logs              bool
 	GitLabURL         string
 	GitLabToken       string
 	GitLabProjectID   int
@@ -56,6 +57,7 @@ func Parse(args []string, getenv func(string) string) (Config, error) {
 	fs.StringVar(&cfg.SonarProjectKey, "sonar-project-key", cfg.SonarProjectKey, "SonarQube project key (env: SONAR_PROJECT_KEY)")
 	fs.StringVar(&cfg.SeverityThreshold, "severity-threshold", "", "Minimum SonarQube issue severity to include (INFO, MINOR, MAJOR, CRITICAL, BLOCKER)")
 	fs.BoolVar(&cfg.DryRun, "dry-run", false, "Run without resolving or posting GitLab comments")
+	fs.BoolVar(&cfg.Logs, "logs", false, "Print detailed logs including fetched SonarQube issues")
 	fs.StringVar(&cfg.GitLabURL, "gitlab-url", cfg.GitLabURL, "GitLab server URL (env: GITLAB_URL)")
 	fs.StringVar(&cfg.GitLabToken, "gitlab-token", cfg.GitLabToken, "GitLab access token (env: GITLAB_TOKEN)")
 	fs.StringVar(&projectID, "project-id", projectID, "GitLab project ID (env: CI_PROJECT_ID)")
@@ -147,6 +149,7 @@ Flags:
   --sonar-project-key string     SonarQube project key (env: SONAR_PROJECT_KEY)
   --severity-threshold string    Minimum issue severity (INFO, MINOR, MAJOR, CRITICAL, BLOCKER)
   --dry-run                      Run without resolving or posting GitLab comments
+  --logs                         Print detailed logs including fetched SonarQube issues
   --gitlab-url string            GitLab server URL (env: GITLAB_URL)
   --gitlab-token string          GitLab access token (env: GITLAB_TOKEN)
   --project-id string            GitLab project ID (env: CI_PROJECT_ID)

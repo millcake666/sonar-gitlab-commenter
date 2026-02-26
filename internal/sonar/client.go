@@ -214,7 +214,7 @@ func (c *Client) fetchCoverageMetrics(ctx context.Context, projectKey string) (f
 	for _, measure := range payload.Component.Measures {
 		switch measure.Metric {
 		case "coverage":
-			parsed, err := strconv.ParseFloat(measure.Value, 64)
+			parsed, err := parseMetricFloat(measure.Value)
 			if err != nil {
 				return 0, 0, fmt.Errorf("failed to parse SonarQube metric coverage value %q: %w", measure.Value, err)
 			}
@@ -222,7 +222,7 @@ func (c *Client) fetchCoverageMetrics(ctx context.Context, projectKey string) (f
 			overallCoverage = parsed
 			overallFound = true
 		case "new_coverage":
-			parsed, err := strconv.ParseFloat(measure.Value, 64)
+			parsed, err := parseMetricFloat(measure.Value)
 			if err != nil {
 				return 0, 0, fmt.Errorf("failed to parse SonarQube metric new_coverage value %q: %w", measure.Value, err)
 			}
@@ -237,6 +237,15 @@ func (c *Client) fetchCoverageMetrics(ctx context.Context, projectKey string) (f
 	}
 
 	return overallCoverage, newCoverage, nil
+}
+
+func parseMetricFloat(value string) (float64, error) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return 0, nil
+	}
+
+	return strconv.ParseFloat(trimmed, 64)
 }
 
 func (c *Client) getJSON(ctx context.Context, endpoint string, query url.Values, target any) error {

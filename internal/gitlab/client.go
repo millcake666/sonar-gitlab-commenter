@@ -17,6 +17,7 @@ const maxResponseBodyForError = 512
 const perPageLimit = 100
 
 var ErrUnauthorized = errors.New("unauthorized GitLab API request")
+var ErrInvalidInlinePosition = errors.New("invalid inline discussion position")
 
 type Client struct {
 	baseURL    string
@@ -33,6 +34,12 @@ type DiffRefs struct {
 type MergeRequest struct {
 	IID      int
 	DiffRefs DiffRefs
+}
+
+type MergeRequestChange struct {
+	OldPath string
+	NewPath string
+	Diff    string
 }
 
 type Discussion struct {
@@ -60,6 +67,16 @@ type mergeRequestDiffRefs struct {
 	BaseSHA  string `json:"base_sha"`
 	StartSHA string `json:"start_sha"`
 	HeadSHA  string `json:"head_sha"`
+}
+
+type mergeRequestChangesResponse struct {
+	Changes []mergeRequestChangeResponse `json:"changes"`
+}
+
+type mergeRequestChangeResponse struct {
+	OldPath string `json:"old_path"`
+	NewPath string `json:"new_path"`
+	Diff    string `json:"diff"`
 }
 
 type discussionResponse struct {
@@ -151,8 +168,10 @@ func (c *Client) CreateInlineDiscussion(
 	projectID,
 	mrIID int,
 	body,
-	path string,
-	line int,
+	oldPath,
+	newPath string,
+	oldLine,
+	newLine int,
 	diffRefs DiffRefs,
 ) error {
 	if err := validateMergeRequestCoordinates(projectID, mrIID); err != nil {
@@ -161,12 +180,13 @@ func (c *Client) CreateInlineDiscussion(
 	if strings.TrimSpace(body) == "" {
 		return fmt.Errorf("discussion body cannot be empty")
 	}
-	path = strings.TrimSpace(path)
-	if path == "" {
-		return fmt.Errorf("discussion path cannot be empty")
+	oldPath = strings.TrimSpace(oldPath)
+	newPath = strings.TrimSpace(newPath)
+	if oldPath == "" && newPath == "" {
+		return fmt.Errorf("discussion paths cannot both be empty")
 	}
-	if line <= 0 {
-		return fmt.Errorf("discussion line must be positive")
+	if oldLine <= 0 && newLine <= 0 {
+		return fmt.Errorf("discussion must have at least one line number")
 	}
 
 	normalizedDiffRefs := normalizeDiffRefs(diffRefs)
@@ -181,11 +201,80 @@ func (c *Client) CreateInlineDiscussion(
 	form.Set("position[base_sha]", normalizedDiffRefs.BaseSHA)
 	form.Set("position[start_sha]", normalizedDiffRefs.StartSHA)
 	form.Set("position[head_sha]", normalizedDiffRefs.HeadSHA)
-	form.Set("position[old_path]", path)
-	form.Set("position[new_path]", path)
-	form.Set("position[new_line]", strconv.Itoa(line))
+	form.Set("position[old_path]", oldPath)
+	form.Set("position[new_path]", newPath)
 
-	return c.postForm(ctx, endpoint, form)
+	// Set line numbers based on what's available
+	// For added lines: only new_line
+	// For deleted lines: only old_line
+	// For context lines: both old_line and new_line
+	if oldLine > 0 {
+		form.Set("position[old_line]", strconv.Itoa(oldLine))
+	}
+	if newLine > 0 {
+		form.Set("position[new_line]", strconv.Itoa(newLine))
+	}
+
+	if err := c.postForm(ctx, endpoint, form); err != nil {
+		if isInvalidInlinePositionError(err) {
+			return fmt.Errorf("%w: %v", ErrInvalidInlinePosition, err)
+		}
+
+		return err
+	}
+
+	return nil
+}
+
+func (c *Client) ListMergeRequestChanges(ctx context.Context, projectID, mrIID int) ([]MergeRequestChange, error) {
+	if err := validateMergeRequestCoordinates(projectID, mrIID); err != nil {
+		return nil, err
+	}
+
+	endpoint := fmt.Sprintf("/api/v4/projects/%d/merge_requests/%d/changes", projectID, mrIID)
+	values := url.Values{}
+	values.Set("access_raw_diffs", "true")
+	requestURL := c.baseURL + endpoint + "?" + values.Encode()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create GitLab request: %w", err)
+	}
+
+	req.Header.Set("PRIVATE-TOKEN", c.token)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to GitLab at %s: %w", c.baseURL, err)
+	}
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return nil, fmt.Errorf("%w: HTTP %d from %s", ErrUnauthorized, resp.StatusCode, endpoint)
+	}
+
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxResponseBodyForError))
+		return nil, fmt.Errorf("GitLab API request failed for %s: HTTP %d: %s", endpoint, resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	var payload mergeRequestChangesResponse
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return nil, fmt.Errorf("failed to decode GitLab response from %s: %w", endpoint, err)
+	}
+
+	changes := make([]MergeRequestChange, 0, len(payload.Changes))
+	for _, item := range payload.Changes {
+		changes = append(changes, MergeRequestChange{
+			OldPath: item.OldPath,
+			NewPath: item.NewPath,
+			Diff:    item.Diff,
+		})
+	}
+
+	return changes, nil
 }
 
 func (c *Client) CreateMergeRequestNote(ctx context.Context, projectID, mrIID int, body string) error {
@@ -447,4 +536,14 @@ func normalizeDiffRefs(diffRefs DiffRefs) DiffRefs {
 		StartSHA: strings.TrimSpace(diffRefs.StartSHA),
 		HeadSHA:  strings.TrimSpace(diffRefs.HeadSHA),
 	}
+}
+
+func isInvalidInlinePositionError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	errorText := err.Error()
+	return strings.Contains(errorText, "line_code") &&
+		strings.Contains(errorText, "valid line code")
 }

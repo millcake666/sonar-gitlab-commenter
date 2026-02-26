@@ -246,6 +246,19 @@ func TestParseDryRunFlag(t *testing.T) {
 	}
 }
 
+func TestParseLogsFlag(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := Parse([]string{"--logs=true"}, mapGetenv(baseEnv()))
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	if !cfg.Logs {
+		t.Fatal("expected logs mode to be enabled")
+	}
+}
+
 func TestParseHelpReturnsDocumentation(t *testing.T) {
 	t.Parallel()
 
@@ -262,6 +275,7 @@ func TestParseHelpReturnsDocumentation(t *testing.T) {
 	for _, expected := range []string{
 		"--sonar-url",
 		"--dry-run",
+		"--logs",
 		"--severity-threshold",
 		"--gitlab-url",
 		"--project-id",
